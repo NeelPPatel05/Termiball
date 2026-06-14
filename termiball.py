@@ -1,4 +1,4 @@
-!/usr/bin/env python3
+# !/usr/bin/env python3
 """termiball — NBA live tracker in the terminal"""
 
 import curses, subprocess, json, time, threading
