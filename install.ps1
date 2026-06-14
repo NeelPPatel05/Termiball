@@ -4,8 +4,7 @@
 # ──────────────────────────────────────────────────────────────────────────────
 $ErrorActionPreference = "Stop"
 
-$REPO_URL    = "https://raw.githubusercontent.com/you/termiball/main/termiball.py"
-$INSTALL_DIR = "$env:LOCALAPPDATA\Programs\termiball"
+$REPO_URL = "https://raw.githubusercontent.com/NeelPPatel05/Termiball/main/termiball.py"$INSTALL_DIR = "$env:LOCALAPPDATA\Programs\termiball"
 $SCRIPT_PATH = "$INSTALL_DIR\termiball.py"
 $WRAPPER     = "$INSTALL_DIR\termiball.cmd"
 

@@ -5,8 +5,7 @@
 # ──────────────────────────────────────────────────────────────────────────────
 set -e
 
-REPO_URL="https://raw.githubusercontent.com/you/termiball/main/termiball.py"
-INSTALL_DIR="$HOME/.local/bin"
+$REPO_URL = "https://raw.githubusercontent.com/NeelPPatel05/Termiball/main/termiball.py"INSTALL_DIR="$HOME/.local/bin"
 SCRIPT_NAME="termiball"
 TARGET="$INSTALL_DIR/$SCRIPT_NAME"
 
