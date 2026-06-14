@@ -1,16 +1,61 @@
-# !/usr/bin/env python3
+#!/usr/bin/env python3
 """termiball — NBA live tracker in the terminal"""
 
 import curses, subprocess, json, time, threading
 from datetime import datetime
-from assets import PIXEL_DIGITS, LOGO_LINES, BALL_ART, LABEL_MAP, COLS
 
 # ── config ────────────────────────────────────────────────────────────────────
 ESPN_SCORE_URL   = "http://site.api.espn.com/apis/site/v2/sports/basketball/nba/scoreboard"
 ESPN_SUMMARY_URL = "http://site.api.espn.com/apis/site/v2/sports/basketball/nba/summary?event={eid}"
 REFRESH_SEC = 15
 
-# ── shared live state (written by poll thread, read by draw thread) ───────────
+# ── pixel font ────────────────────────────────────────────────────────────────
+PIXEL_DIGITS = {
+    '0': ["███","█ █","█ █","█ █","███"],
+    '1': [" ██","  █","  █","  █","  █"],
+    '2': ["███","  █","███","█  ","███"],
+    '3': ["███","  █","███","  █","███"],
+    '4': ["█ █","█ █","███","  █","  █"],
+    '5': ["███","█  ","███","  █","███"],
+    '6': ["███","█  ","███","█ █","███"],
+    '7': ["███","  █","  █","  █","  █"],
+    '8': ["███","█ █","███","█ █","███"],
+    '9': ["███","█ █","███","  █","███"],
+    '-': ["   ","   ","███","   ","   "],
+}
+
+LOGO_LINES = [
+    "  ████████╗███████╗██████╗ ███╗   ███╗██╗██████╗  █████╗ ██╗     ██╗       ",
+    "  ╚══██╔══╝██╔════╝██╔══██╗████╗ ████║██║██╔══██╗██╔══██╗██║     ██║       ",
+    "     ██║   █████╗  ██████╔╝██╔████╔██║██║██████╔╝███████║██║     ██║       ",
+    "     ██║   ██╔══╝  ██╔══██╗██║╚██╔╝██║██║██╔══██╗██╔══██║██║     ██║       ",
+    "     ██║   ███████╗██║  ██║██║ ╚═╝ ██║██║██████╔╝██║  ██║███████╗███████╗  ",
+    "     ╚═╝   ╚══════╝╚═╝  ╚═╝╚═╝     ╚═╝╚═╝╚═════╝ ╚═╝  ╚═╝╚══════╝╚══════╝  ",
+]
+
+BALL_ART = [
+    "   ███████   ",
+    " ██╲     ╱██ ",
+    "██  ╰───╯  ██",
+    "██─────────██",
+    "██  ╭───╮  ██",
+    " ██╱     ╲██ ",
+    "   ███████   ",
+]
+
+LABEL_MAP = {
+    "MIN":"min","PTS":"pts","FG":"fg","3PT":"3p","FT":"ft",
+    "REB":"reb","AST":"ast","TO":"to","STL":"stl","BLK":"blk","PF":"pf","+/-":"pm",
+}
+
+COLS = [
+    ("NAME","name",20),("POS","pos",3),("MIN","min",5),("PTS","pts",4),
+    ("REB","reb",4),("AST","ast",4),("STL","stl",4),("BLK","blk",4),
+    ("TO","to",3),("FG","fg",6),("3PT","3p",5),("FT","ft",5),
+    ("PF","pf",3),("+/-","pm",4),
+]
+
+# ── shared live state ─────────────────────────────────────────────────────────
 LOCK = threading.Lock()
 LIVE = {
     "home_name":"", "away_name":"", "home_abbr":"", "away_abbr":"",
@@ -28,7 +73,6 @@ HOME_COLOR_IDX=10; AWAY_COLOR_IDX=11
 
 # ── curses helpers ────────────────────────────────────────────────────────────
 def sadd(win, y, x, text, attr=0):
-    """Safe addstr: clips to window width and swallows curses edge-case errors."""
     h, w = win.getmaxyx()
     if y < 0 or y >= h or x < 0: return
     avail = w - x - 1
@@ -37,7 +81,6 @@ def sadd(win, y, x, text, attr=0):
     except curses.error: pass
 
 def hl(win, y, char=None):
-    """Draw a full-width horizontal rule at row y."""
     h, w = win.getmaxyx()
     if char is None: char = curses.ACS_HLINE
     if 0 <= y < h:
@@ -64,7 +107,6 @@ def _to_curses_rgb(h):
 
 def set_team_colors(home_hex, home_alt, away_hex, away_alt):
     if not curses.can_change_color() or curses.COLORS < 16: return
-    # swap to alt color when primary is near-black (invisible on dark backgrounds)
     def pick(p, a): return a if _brightness(p) < 50 and a else p
     for color_idx, pair, hex_, alt in [
         (HOME_COLOR_IDX, C_HOME, home_hex, home_alt),
@@ -87,9 +129,8 @@ def init_colors():
     curses.init_pair(C_LOGO,   curses.COLOR_YELLOW,  -1)
     curses.init_pair(C_ACCENT, curses.COLOR_YELLOW,  -1)
 
-# ── pixel font ────────────────────────────────────────────────────────────────
+# ── pixel font renderer ───────────────────────────────────────────────────────
 def pixel_number(num_str):
-    """Render num_str using the 3×5 block font; returns a list of 5 row-strings."""
     rows = ["","","","",""]
     for ch in num_str:
         g = PIXEL_DIGITS.get(ch, PIXEL_DIGITS['-'])
@@ -138,21 +179,15 @@ def parse_plays(summary):
     for play in summary.get("plays",[])[-40:]:
         text = play.get("text","").strip()
         if not text: continue
-        if text.startswith("tu"):   # ESPN prefixes some entries with "tu" (time-update marker)
-            text = text[2:]
+        while text and text[0].islower():
+            text = text[1:].lstrip()
         if not text: continue
         period = play.get("period",{}).get("number","")
         clock  = str(play.get("clock",{}).get("displayValue",""))
-        if clock.startswith("tu"): clock = clock[2:]
         hs, as_ = play.get("homeScore",""), play.get("awayScore","")
         score   = f" [{as_}-{hs}]" if hs != "" else ""
         qlbl    = f"Q{period} {clock}" if period else ""
-        entry   = f"{qlbl:<11}{text}{score}"
-        # belt-and-suspenders: catch "tu" after any leading whitespace
-        ls = entry.lstrip()
-        if ls.startswith("tu"):
-            entry = entry[:len(entry)-len(ls)] + ls[2:]
-        plays.append(entry)
+        plays.append(f"{qlbl:<11}{text}{score}")
     plays.reverse()
     return plays
 
@@ -182,7 +217,6 @@ def fetch_games():
 
 # ── background poll thread ────────────────────────────────────────────────────
 def poll(event_id):
-    """Fetches scoreboard + summary every REFRESH_SEC seconds and updates LIVE."""
     while True:
         try:
             event = comp = None
@@ -264,7 +298,7 @@ def draw_box(scr, players, color, abbr, score, ts, row):
             sadd(scr, row, 5, fmt_row(p), curses.color_pair(C_DIM))
         row += 1
 
-# ── splash screen / game picker ───────────────────────────────────────────────
+# ── splash / game picker ──────────────────────────────────────────────────────
 def _exit_msg(scr, msg):
     h, _ = scr.getmaxyx()
     scr.erase()
@@ -332,30 +366,30 @@ def pick_game(scr):
         elif key in (curses.KEY_ENTER, 10, 13):  return games[sel]
         elif key in (ord("q"), ord("Q")):         return None
 
-# ── scoreboard header ─────────────────────────────────────────────────────────
+# ── scoreboard ────────────────────────────────────────────────────────────────
 def draw_scoreboard(scr, s, status_str):
     h, w  = scr.getmaxyx()
     mid   = w // 2
     row   = 2
 
-    # team names flanking center
     home_name = s["home_name"].upper()
-    sadd(scr, row, max(2, mid-2-len(home_name)), home_name, curses.color_pair(C_HOME)|curses.A_BOLD)
-    sadd(scr, row, mid+2, s["away_name"].upper(),            curses.color_pair(C_AWAY)|curses.A_BOLD)
-    row += 1
-
-    # pixel scores: home left-of-center, away right-of-center
-    hw     = len(str(s["home_score"])) * 4   # each digit is 3 chars + 1 space
+    away_name = s["away_name"].upper()
+    hw = len(str(s["home_score"])) * 4
     home_x = max(2, mid - 10 - hw)
     away_x = mid + 10
-    for i, (home_r, away_r) in enumerate(zip(pixel_number(str(s["home_score"])),
-                                              pixel_number(str(s["away_score"])))):
-        sadd(scr, row+i, home_x, home_r, curses.color_pair(C_HOME)|curses.A_BOLD)
-        sadd(scr, row+i, away_x, away_r, curses.color_pair(C_AWAY)|curses.A_BOLD)
+    home_name_x = max(0, home_x + (hw - len(home_name)) // 2)
+    away_name_x = max(0, away_x + (len(str(s["away_score"]))*4 - len(away_name)) // 2)
+    sadd(scr, row, home_name_x, home_name, curses.color_pair(C_HOME)|curses.A_BOLD)
+    sadd(scr, row, away_name_x, away_name, curses.color_pair(C_AWAY)|curses.A_BOLD)
+    row += 1
+
+    for i, (hr, ar) in enumerate(zip(pixel_number(str(s["home_score"])),
+                                     pixel_number(str(s["away_score"])))):
+        sadd(scr, row+i, home_x, hr, curses.color_pair(C_HOME)|curses.A_BOLD)
+        sadd(scr, row+i, away_x, ar, curses.color_pair(C_AWAY)|curses.A_BOLD)
     sadd(scr, row+1, mid-len(status_str)//2, status_str, curses.color_pair(C_ACCENT)|curses.A_BOLD)
     row += 6
 
-    # per-quarter scores
     hqs, aqs = s["home_qs"], s["away_qs"]
     num_q    = max(len(hqs), len(aqs), 4)
     def qlabel(i): return f"OT{i-3}" if i >= 4 else f"Q{i+1}"
@@ -374,10 +408,10 @@ def draw(scr, tab):
         hts   = dict(s["home_team_stats"]); ats = dict(s["away_team_stats"])
 
     stype, period = s["status_type"], s["period"]
-    if   "in"   in stype:                                 status_str = f"LIVE  {'Q'+str(period) if period<=4 else 'OT'+str(period-4)}  {s['clock']}"
+    if   "in"   in stype:                                   status_str = f"LIVE  {'Q'+str(period) if period<=4 else 'OT'+str(period-4)}  {s['clock']}"
     elif "post" in stype or "final" in s["status"].lower(): status_str = "FINAL"
-    elif "half" in s["status"].lower():                    status_str = "HALFTIME"
-    else:                                                  status_str = s["game_detail"] or s["status"].upper()
+    elif "half" in s["status"].lower():                     status_str = "HALFTIME"
+    else:                                                    status_str = s["game_detail"] or s["status"].upper()
 
     title = s["game_title"].upper() or "NBA LIVE TRACKER"
     sadd(scr, 0, 0, f"  {title}  │  Updated: {s['updated']}  ".ljust(w),
@@ -386,7 +420,6 @@ def draw(scr, tab):
     row = draw_scoreboard(scr, s, status_str)
     hl(scr, row); row += 1
 
-    # tab bar
     tabs = [f" 1  {s['home_abbr']} Box Score ", f" 2  {s['away_abbr']} Box Score ", " 3  Play Feed "]
     tx = 2
     for i, t in enumerate(tabs):
@@ -394,7 +427,6 @@ def draw(scr, tab):
         tx += len(t) + 2
     row += 1; hl(scr, row); row += 1
 
-    # tab content
     if tab == 0:
         if hp: draw_box(scr, hp, C_HOME, s["home_abbr"], s["home_score"], hts, row)
         else:  sadd(scr, row, 2, "Waiting for box score...", curses.color_pair(C_DIM))
@@ -407,12 +439,12 @@ def draw(scr, tab):
         for play in plays:
             if row >= h-2: break
             scoring = "[" in play
-            sadd(scr, row, 2, play, curses.color_pair(C_NORMAL if scoring else C_DIM)|(curses.A_BOLD if scoring else 0))
+            sadd(scr, row, 2, play.ljust(w-4),
+                 curses.color_pair(C_NORMAL if scoring else C_DIM)|(curses.A_BOLD if scoring else 0))
             row += 1
         if not plays:
             sadd(scr, row, 2, "Play-by-play will appear once the game starts.", curses.color_pair(C_DIM))
 
-    # bottom status bar
     if s["error"]:
         sadd(scr, h-2, 2, f"[!] {s['error']}", curses.color_pair(C_WARN))
     else:
